@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# GRE Tunnel Manager v2.1 - Token Based, Auto-Ping & Logging
+# GRE Tunnel Manager v2.2 - Smart IPv4/IPv6, Token Based, Auto-Ping
 # فزار فناور | فناوران زیرساخت داده راهورد
 # ==============================================================================
 
@@ -11,7 +11,7 @@ CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# پیدا کردن اولین کارت شبکه GRE آزاد با خواندن مستقیم از کرنل
+# پیدا کردن اولین کارت شبکه GRE آزاد
 find_free_interface() {
     for i in {1..100}; do
         if [ ! -d "/sys/class/net/gre$i" ]; then
@@ -21,7 +21,6 @@ find_free_interface() {
     done
 }
 
-# نصب هوشمند پیش‌نیازها (اسکیپ در صورت نصب بودن)
 install_deps() {
     if command -v iptables >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then
         echo -e "${GREEN}پیش‌نیازها از قبل نصب هستند (پرش از این مرحله).${NC}"
@@ -42,6 +41,15 @@ generate_node_a() {
     read -p "آی‌پی عمومی همین سرور را وارد کنید: " MY_IP
     read -p "آی‌پی عمومی سرور مقابل را وارد کنید: " REMOTE_IP
     
+    # تشخیص هوشمند IPv4 یا IPv6
+    if [[ "$REMOTE_IP" == *":"* ]]; then
+        echo -e "${YELLOW}شبکه IPv6 تشخیص داده شد. تنظیم هسته روی ip6gre...${NC}"
+        CREATE_CMD="/sbin/ip link add \${GRE_IF} type ip6gre local ${MY_IP} remote ${REMOTE_IP}"
+    else
+        echo -e "${YELLOW}شبکه IPv4 تشخیص داده شد. تنظیم هسته روی gre...${NC}"
+        CREATE_CMD="/sbin/ip tunnel add \${GRE_IF} mode gre remote ${REMOTE_IP} local ${MY_IP}"
+    fi
+
     SUBNET_3RD=$((RANDOM % 200 + 10))
     SUBNET="10.200.${SUBNET_3RD}"
     GRE_IF=$(find_free_interface)
@@ -54,10 +62,11 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/ip tunnel add ${GRE_IF} mode gre remote ${REMOTE_IP} local ${MY_IP}
-ExecStart=/sbin/ip link set ${GRE_IF} up
-ExecStart=/sbin/ip addr add ${SUBNET}.1/30 dev ${GRE_IF}
-ExecStop=/sbin/ip link del ${GRE_IF}
+Environment="GRE_IF=${GRE_IF}"
+ExecStart=${CREATE_CMD}
+ExecStart=/sbin/ip link set \${GRE_IF} up
+ExecStart=/sbin/ip addr add ${SUBNET}.1/30 dev \${GRE_IF}
+ExecStop=/sbin/ip link del \${GRE_IF}
 
 [Install]
 WantedBy=multi-user.target
@@ -94,6 +103,12 @@ consume_node_b() {
     SUBNET=$(echo "$DECODED" | cut -d'|' -f3)
     GRE_IF=$(find_free_interface)
     
+    if [[ "$REMOTE_IP" == *":"* ]]; then
+        CREATE_CMD="/sbin/ip link add \${GRE_IF} type ip6gre local ${MY_IP} remote ${REMOTE_IP}"
+    else
+        CREATE_CMD="/sbin/ip tunnel add \${GRE_IF} mode gre remote ${REMOTE_IP} local ${MY_IP}"
+    fi
+
     cat <<EOF > /etc/systemd/system/gre-tun-${GRE_IF}.service
 [Unit]
 Description=GRE Tunnel ${GRE_IF}
@@ -102,10 +117,11 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/ip tunnel add ${GRE_IF} mode gre remote ${REMOTE_IP} local ${MY_IP}
-ExecStart=/sbin/ip link set ${GRE_IF} up
-ExecStart=/sbin/ip addr add ${SUBNET}.2/30 dev ${GRE_IF}
-ExecStop=/sbin/ip link del ${GRE_IF}
+Environment="GRE_IF=${GRE_IF}"
+ExecStart=${CREATE_CMD}
+ExecStart=/sbin/ip link set \${GRE_IF} up
+ExecStart=/sbin/ip addr add ${SUBNET}.2/30 dev \${GRE_IF}
+ExecStop=/sbin/ip link del \${GRE_IF}
 
 [Install]
 WantedBy=multi-user.target
@@ -127,7 +143,7 @@ EOF
     read -p "برای بازگشت به منو اینتر بزنید..."
 }
 
-# 3. مدیریت پورت‌ها با سیستم تشخیص دقیق تانل
+# 3. مدیریت پورت‌ها
 manage_ports() {
     echo -e "${CYAN}--- مدیریت انتقال پورت‌های خاص ---${NC}"
     ACTIVE_IFS=$(ls /sys/class/net/ 2>/dev/null | grep -E '^gre[1-9]')
@@ -179,18 +195,30 @@ check_status_logs() {
         echo -e "${GREEN}نام تانل:${NC} $iface"
         TUN_IP=$(ip -4 addr show $iface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
         echo -e "${GREEN}آی‌پی لوکال:${NC} $TUN_IP"
-        echo -e "${GREEN}وضعیت سرویس (systemctl):${NC}"
+        echo -e "${GREEN}وضعیت سرویس:${NC}"
         systemctl status gre-tun-${iface}.service --no-pager | grep -E "Active:|Failed|Error"
         echo -e "${YELLOW}====================================${NC}\n"
     done
     read -p "برای بازگشت به منو اینتر بزنید..."
 }
 
+# پاکسازی سرویس‌های خراب (در صورت وجود ارور قبلی)
+cleanup_failed_services() {
+    FAILED=$(systemctl --failed --no-legend | grep gre-tun | awk '{print $1}')
+    for srv in $FAILED; do
+        systemctl stop $srv >/dev/null 2>&1
+        systemctl disable $srv >/dev/null 2>&1
+        rm -f /etc/systemd/system/$srv
+    done
+    systemctl daemon-reload >/dev/null 2>&1
+}
+cleanup_failed_services
+
 # منوی اصلی
 while true; do
     clear
     echo -e "${CYAN}======================================================${NC}"
-    echo -e "${YELLOW}       GRE Tunnel Manager v2.1 (Auto-Ping & Log)      ${NC}"
+    echo -e "${YELLOW}       GRE Tunnel Manager v2.2 (Smart IPv6/IPv4)      ${NC}"
     echo -e "${YELLOW}       فزار فناور | فناوران زیرساخت داده راهورد       ${NC}"
     echo -e "${CYAN}======================================================${NC}"
     echo "1) ساخت تانل جدید (تولید توکن ارتباطی)"
