@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# GRE Tunnel Manager v2.2 - Smart IPv4/IPv6, Token Based, Auto-Ping
+# GRE Tunnel Manager v3.0 - Ultimate Edition
 # فزار فناور | فناوران زیرساخت داده راهورد
 # ==============================================================================
 
@@ -11,7 +11,6 @@ CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# پیدا کردن اولین کارت شبکه GRE آزاد
 find_free_interface() {
     for i in {1..100}; do
         if [ ! -d "/sys/class/net/gre$i" ]; then
@@ -22,10 +21,8 @@ find_free_interface() {
 }
 
 install_deps() {
-    if command -v iptables >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 && command -v base64 >/dev/null 2>&1; then
-        echo -e "${GREEN}پیش‌نیازها از قبل نصب هستند (پرش از این مرحله).${NC}"
-    else
-        echo -e "${YELLOW}در حال بررسی و نصب پیش‌نیازها...${NC}"
+    if ! command -v iptables >/dev/null 2>&1 || ! command -v base64 >/dev/null 2>&1; then
+        echo -e "${YELLOW}در حال نصب پیش‌نیازها...${NC}"
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -q -y >/dev/null 2>&1
         apt-get install -q -y iptables iproute2 base64 iptables-persistent >/dev/null 2>&1
@@ -34,19 +31,16 @@ install_deps() {
     sysctl -p /etc/sysctl.d/99-custom-gre.conf >/dev/null 2>&1
 }
 
-# 1. ساخت سرور مبدأ و تولید توکن
+# 1. ساخت تانل
 generate_node_a() {
     install_deps
     echo -e "${CYAN}--- راه‌اندازی سرور مبدأ (ایجاد توکن) ---${NC}"
     read -p "آی‌پی عمومی همین سرور را وارد کنید: " MY_IP
     read -p "آی‌پی عمومی سرور مقابل را وارد کنید: " REMOTE_IP
     
-    # تشخیص هوشمند IPv4 یا IPv6
     if [[ "$REMOTE_IP" == *":"* ]]; then
-        echo -e "${YELLOW}شبکه IPv6 تشخیص داده شد. تنظیم هسته روی ip6gre...${NC}"
         CREATE_CMD="/sbin/ip link add \${GRE_IF} type ip6gre local ${MY_IP} remote ${REMOTE_IP}"
     else
-        echo -e "${YELLOW}شبکه IPv4 تشخیص داده شد. تنظیم هسته روی gre...${NC}"
         CREATE_CMD="/sbin/ip tunnel add \${GRE_IF} mode gre remote ${REMOTE_IP} local ${MY_IP}"
     fi
 
@@ -87,7 +81,7 @@ EOF
     read -p "برای بازگشت به منو اینتر بزنید..."
 }
 
-# 2. اتصال به تانل با توکن + تست پینگ اتوماتیک
+# 2. مصرف توکن
 consume_node_b() {
     install_deps
     echo -e "${CYAN}--- اتصال به تانل (مصرف توکن) ---${NC}"
@@ -132,99 +126,132 @@ EOF
     systemctl start gre-tun-${GRE_IF}.service
     
     echo -e "\n${GREEN}اتصال موفق! تانل (${GRE_IF}) تنظیم شد.${NC}"
-    echo -e "${YELLOW}در حال بررسی واقعی ارتباط شبکه (Ping Test)...${NC}"
-    sleep 2
-    
-    if ping -c 3 -W 2 ${SUBNET}.1 >/dev/null 2>&1; then
-        echo -e "${GREEN}✅ ارتباط پینگ موفقیت‌آمیز بود! تانل کاملاً برقرار است.${NC}\n"
-    else
-        echo -e "${RED}⚠️ هشدار: تانل ساخته شد اما پینگ ناموفق بود. ممکن است آی‌پی‌ها فیلتر باشند یا فایروال بسته باشد.${NC}\n"
-    fi
     read -p "برای بازگشت به منو اینتر بزنید..."
 }
 
-# 3. مدیریت پورت‌ها
+# 3. مدیریت پورت (افزودن/حذف)
 manage_ports() {
     echo -e "${CYAN}--- مدیریت انتقال پورت‌های خاص ---${NC}"
     ACTIVE_IFS=$(ls /sys/class/net/ 2>/dev/null | grep -E '^gre[1-9]')
+    if [ -z "$ACTIVE_IFS" ]; then echo -e "${RED}هیچ تانلی یافت نشد!${NC}"; sleep 2; return; fi
     
-    if [ -z "$ACTIVE_IFS" ]; then
-        echo -e "${RED}هیچ تانل GRE فعالی یافت نشد! ابتدا تانل بسازید.${NC}"; sleep 2; return
-    fi
-    
-    echo -e "${YELLOW}تانل‌های فعال شما:${NC}"
     for iface in $ACTIVE_IFS; do
         TUN_IP=$(ip -4 addr show $iface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
         echo " - $iface (IP: $TUN_IP)"
     done
-    echo ""
-    read -p "نام تانل مورد نظر را تایپ کنید (مثلاً gre1): " TARGET_GRE
+    read -p "نام تانل مورد نظر (مثلاً gre1): " TARGET_GRE
     
     MY_TUN_IP=$(ip -4 addr show $TARGET_GRE 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    if [ -z "$MY_TUN_IP" ]; then
-        echo -e "${RED}تانل وارد شده نامعتبر است!${NC}"; sleep 2; return
-    fi
+    if [ -z "$MY_TUN_IP" ]; then echo -e "${RED}نامعتبر!${NC}"; sleep 2; return; fi
     
     REMOTE_TUN_IP="${MY_TUN_IP%.*}.1"
     if [ "$MY_TUN_IP" == "$REMOTE_TUN_IP" ]; then REMOTE_TUN_IP="${MY_TUN_IP%.*}.2"; fi
 
-    echo -e "انتقال ترافیک از این سرور به آی‌پی: ${CYAN}$REMOTE_TUN_IP${NC}"
-    read -p "چه پورتی را می‌خواهید عبور دهید؟ (مثلاً 51820): " PORT
-    
-    iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $REMOTE_TUN_IP:$PORT
-    iptables -t nat -A PREROUTING -p udp --dport $PORT -j DNAT --to-destination $REMOTE_TUN_IP:$PORT
-    iptables -t nat -A POSTROUTING -d $REMOTE_TUN_IP -p tcp --dport $PORT -j SNAT --to-source $MY_TUN_IP
-    iptables -t nat -A POSTROUTING -d $REMOTE_TUN_IP -p udp --dport $PORT -j SNAT --to-source $MY_TUN_IP
-    
+    read -p "چه پورتی را می‌خواهید مدیریت کنید؟ (مثلاً 51820): " PORT
+    echo "1) اضافه کردن پورت به تانل"
+    echo "2) حذف کردن پورت از تانل"
+    read -p "انتخاب: " ACTION
+
+    if [ "$ACTION" == "1" ]; then
+        iptables -t nat -A PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $REMOTE_TUN_IP:$PORT
+        iptables -t nat -A PREROUTING -p udp --dport $PORT -j DNAT --to-destination $REMOTE_TUN_IP:$PORT
+        iptables -t nat -A POSTROUTING -d $REMOTE_TUN_IP -p tcp --dport $PORT -j SNAT --to-source $MY_TUN_IP
+        iptables -t nat -A POSTROUTING -d $REMOTE_TUN_IP -p udp --dport $PORT -j SNAT --to-source $MY_TUN_IP
+        echo -e "${GREEN}پورت $PORT با موفقیت اضافه شد!${NC}"
+    elif [ "$ACTION" == "2" ]; then
+        iptables -t nat -D PREROUTING -p tcp --dport $PORT -j DNAT --to-destination $REMOTE_TUN_IP:$PORT 2>/dev/null
+        iptables -t nat -D PREROUTING -p udp --dport $PORT -j DNAT --to-destination $REMOTE_TUN_IP:$PORT 2>/dev/null
+        iptables -t nat -D POSTROUTING -d $REMOTE_TUN_IP -p tcp --dport $PORT -j SNAT --to-source $MY_TUN_IP 2>/dev/null
+        iptables -t nat -D POSTROUTING -d $REMOTE_TUN_IP -p udp --dport $PORT -j SNAT --to-source $MY_TUN_IP 2>/dev/null
+        echo -e "${GREEN}پورت $PORT با موفقیت حذف شد!${NC}"
+    fi
     netfilter-persistent save >/dev/null 2>&1
-    echo -e "${GREEN}پورت $PORT با موفقیت به تانل $TARGET_GRE متصل شد!${NC}"
     read -p "برای بازگشت به منو اینتر بزنید..."
 }
 
-# 4. سیستم مانیتورینگ و لاگ‌گیری
-check_status_logs() {
-    echo -e "${CYAN}--- وضعیت و لاگ تانل‌ها ---${NC}"
+# 4. نمایش توکن تانل موجود
+show_token() {
+    echo -e "${CYAN}--- بازیابی توکن تانل‌های فعال ---${NC}"
     ACTIVE_IFS=$(ls /sys/class/net/ 2>/dev/null | grep -E '^gre[1-9]')
+    if [ -z "$ACTIVE_IFS" ]; then echo -e "${RED}هیچ تانلی یافت نشد!${NC}"; sleep 2; return; fi
     
-    if [ -z "$ACTIVE_IFS" ]; then
-        echo -e "${RED}هیچ تانلی در سیستم ثبت نشده است.${NC}"; sleep 2; return
+    for iface in $ACTIVE_IFS; do echo " - $iface"; done
+    read -p "نام تانل مورد نظر (مثلاً gre1): " TARGET_GRE
+    
+    LOCAL_PUB=$(ip -d link show $TARGET_GRE 2>/dev/null | grep -oP '(?<=local\s)[a-fA-F0-9\.:]+' | head -n 1)
+    REMOTE_PUB=$(ip -d link show $TARGET_GRE 2>/dev/null | grep -oP '(?<=remote\s)[a-fA-F0-9\.:]+' | head -n 1)
+    SUBNET_FULL=$(ip -4 addr show $TARGET_GRE 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    SUBNET=$(echo $SUBNET_FULL | cut -d'.' -f1,2,3)
+    
+    if [ -z "$LOCAL_PUB" ] || [ -z "$SUBNET" ]; then
+        echo -e "${RED}خطا در خواندن اطلاعات تانل!${NC}"; sleep 2; return
     fi
     
-    for iface in $ACTIVE_IFS; do
-        echo -e "${YELLOW}====================================${NC}"
-        echo -e "${GREEN}نام تانل:${NC} $iface"
-        TUN_IP=$(ip -4 addr show $iface 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-        echo -e "${GREEN}آی‌پی لوکال:${NC} $TUN_IP"
-        echo -e "${GREEN}وضعیت سرویس:${NC}"
-        systemctl status gre-tun-${iface}.service --no-pager | grep -E "Active:|Failed|Error"
-        echo -e "${YELLOW}====================================${NC}\n"
-    done
+    TOKEN_RAW="${LOCAL_PUB}|${REMOTE_PUB}|${SUBNET}"
+    TOKEN=$(echo -n "$TOKEN_RAW" | base64 -w 0)
+    
+    echo -e "${YELLOW}توکن تانل $TARGET_GRE :${NC}"
+    echo -e "=========================================================="
+    echo -e "${CYAN}${TOKEN}${NC}"
+    echo -e "==========================================================\n"
     read -p "برای بازگشت به منو اینتر بزنید..."
 }
 
-# پاکسازی سرویس‌های خراب (در صورت وجود ارور قبلی)
-cleanup_failed_services() {
-    FAILED=$(systemctl --failed --no-legend | grep gre-tun | awk '{print $1}')
-    for srv in $FAILED; do
-        systemctl stop $srv >/dev/null 2>&1
-        systemctl disable $srv >/dev/null 2>&1
-        rm -f /etc/systemd/system/$srv
-    done
-    systemctl daemon-reload >/dev/null 2>&1
+# 5. تست پینگ
+test_ping() {
+    echo -e "${CYAN}--- تست ارتباط درون تانل ---${NC}"
+    ACTIVE_IFS=$(ls /sys/class/net/ 2>/dev/null | grep -E '^gre[1-9]')
+    if [ -z "$ACTIVE_IFS" ]; then echo -e "${RED}هیچ تانلی یافت نشد!${NC}"; sleep 2; return; fi
+    
+    for iface in $ACTIVE_IFS; do echo " - $iface"; done
+    read -p "نام تانل مورد نظر (مثلاً gre1): " TARGET_GRE
+    
+    MY_TUN_IP=$(ip -4 addr show $TARGET_GRE 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    REMOTE_TUN_IP="${MY_TUN_IP%.*}.1"
+    if [ "$MY_TUN_IP" == "$REMOTE_TUN_IP" ]; then REMOTE_TUN_IP="${MY_TUN_IP%.*}.2"; fi
+
+    echo -e "${YELLOW}در حال پینگ به $REMOTE_TUN_IP ...${NC}"
+    if ping -c 4 -W 2 $REMOTE_TUN_IP; then
+        echo -e "${GREEN}✅ ارتباط برقرار است!${NC}"
+    else
+        echo -e "${RED}⚠️ ارتباط قطع است!${NC}"
+    fi
+    read -p "برای بازگشت به منو اینتر بزنید..."
 }
-cleanup_failed_services
+
+# 6. حذف کامل تانل
+delete_tunnel() {
+    echo -e "${RED}--- حذف کامل تانل ---${NC}"
+    ACTIVE_IFS=$(ls /sys/class/net/ 2>/dev/null | grep -E '^gre[1-9]')
+    if [ -z "$ACTIVE_IFS" ]; then echo -e "${RED}هیچ تانلی یافت نشد!${NC}"; sleep 2; return; fi
+    
+    for iface in $ACTIVE_IFS; do echo " - $iface"; done
+    read -p "کدام تانل را می‌خواهید کاملاً پاک کنید؟ (مثلاً gre1): " TARGET_GRE
+    
+    systemctl stop gre-tun-${TARGET_GRE}.service >/dev/null 2>&1
+    systemctl disable gre-tun-${TARGET_GRE}.service >/dev/null 2>&1
+    rm -f /etc/systemd/system/gre-tun-${TARGET_GRE}.service
+    systemctl daemon-reload
+    ip link del $TARGET_GRE >/dev/null 2>&1
+    
+    echo -e "${GREEN}تانل $TARGET_GRE و تمامی سرویس‌های آن با موفقیت پاک شد!${NC}"
+    echo -e "${YELLOW}نکته: رول‌های پورت فورواردینگ iptables مربوط به این تانل باید از بخش مدیریت پورت حذف شوند.${NC}"
+    read -p "برای بازگشت به منو اینتر بزنید..."
+}
 
 # منوی اصلی
 while true; do
     clear
     echo -e "${CYAN}======================================================${NC}"
-    echo -e "${YELLOW}       GRE Tunnel Manager v2.2 (Smart IPv6/IPv4)      ${NC}"
+    echo -e "${YELLOW}       GRE Tunnel Manager v3.0 (Ultimate Edition)     ${NC}"
     echo -e "${YELLOW}       فزار فناور | فناوران زیرساخت داده راهورد       ${NC}"
     echo -e "${CYAN}======================================================${NC}"
     echo "1) ساخت تانل جدید (تولید توکن ارتباطی)"
-    echo "2) اتصال به تانل (همراه با تست پینگ اتوماتیک)"
-    echo "3) انتقال یک پورت خاص به داخل تانل"
-    echo "4) وضعیت اتصال و لاگ تانل‌ها"
+    echo "2) اتصال به تانل (با استفاده از توکن)"
+    echo "3) مدیریت پورت‌ها (اضافه / حذف پورت)"
+    echo "4) نمایش مجدد توکنِ یک تانل فعال"
+    echo "5) تست وضعیت ارتباط (Ping Test)"
+    echo "6) حذف کامل یک تانل (Delete)"
     echo "0) خروج"
     echo "------------------------------------------------------"
     read -p "انتخاب شما: " choice
@@ -232,7 +259,9 @@ while true; do
         1) generate_node_a ;;
         2) consume_node_b ;;
         3) manage_ports ;;
-        4) check_status_logs ;;
+        4) show_token ;;
+        5) test_ping ;;
+        6) delete_tunnel ;;
         0) echo -e "${GREEN}خروج...${NC}"; exit 0 ;;
         *) echo -e "${RED}گزینه نامعتبر!${NC}"; sleep 1 ;;
     esac
